@@ -3,10 +3,15 @@ FROM node:20-alpine AS build
 
 WORKDIR /app
 
-COPY package.json ./
+COPY package*.json ./
 RUN npm install
 
 COPY . .
+
+# Backend URL baked into the bundle. Empty -> defaults to http://localhost:8000.
+# Override with: build.args.VITE_API_URL in docker-compose.yml
+ARG VITE_API_URL=
+ENV VITE_API_URL=$VITE_API_URL
 RUN npm run build
 
 # Stage 2: Serve with nginx

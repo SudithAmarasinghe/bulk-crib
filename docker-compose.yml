@@ -4,6 +4,21 @@ services:
     container_name: bulkcrib-backend
     ports:
       - "8000:8000"
+    environment:
+      # How long processed jobs (results + ZIP) are kept before automatic deletion.
+      RETENTION_DAYS: "365"
+      # Where the SQLite store lives inside the container (mapped to the volume below).
+      DATA_DIR: /app/data
+      # Refuse sources larger than this many rows.
+      MAX_SOURCE_ROWS: "1000000"
+      # Comma-separated list of frontend origins allowed to call the API.
+      ALLOWED_ORIGINS: "http://localhost:3000,http://localhost:5173"
+    volumes:
+      - backend_data:/app/data
+    extra_hosts:
+      # Lets the container reach a MySQL server running on the host machine
+      # via the hostname host.docker.internal (needed on Linux; harmless elsewhere).
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
   frontend:
@@ -14,3 +29,7 @@ services:
     depends_on:
       - backend
     restart: unless-stopped
+
+volumes:
+  # Persistent job store. Survives `docker compose down`; removed only with `down -v`.
+  backend_data:

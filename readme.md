@@ -1,43 +1,64 @@
-# Excel ID Processor (BulkCrib)
+# BulkCrib — ID Processor
 
 **By AI & Data Science Unit — Commercial Bank of Ceylon**
 
-A dockerized web application that cleans, validates, and formats customer ID numbers from Excel files, splitting them into Personal (Consumer) and Corporate records ready for bulk credit report submission.
+A dockerized web application that cleans, validates, and formats customer ID numbers for bulk credit report submission. Data can come from an **uploaded Excel file** or directly from a **MySQL table**; you choose which source columns hold the ID number and the Personal/Corporate flag, preview the data, process it, and review every ID that was changed. Each processed job is kept for one year and can be re-opened or re-downloaded from the History screen.
 
 ---
 
 ## Table of Contents
 
-1. [Architecture](#architecture)
-2. [Prerequisites](#prerequisites)
-3. [Project Structure](#project-structure)
-4. [Quick Start](#quick-start)
-5. [Usage](#usage)
-6. [Features](#features)
-7. [Excel File Requirements](#excel-file-requirements)
-8. [API Reference](#api-reference)
-9. [Common Commands](#common-commands)
-10. [Troubleshooting](#troubleshooting)
-11. [Configuration](#configuration)
-12. [Support](#support)
+1. [What's New in v4.0](#whats-new-in-v40)
+2. [Architecture](#architecture)
+3. [Prerequisites](#prerequisites)
+4. [Project Structure](#project-structure)
+5. [Quick Start](#quick-start)
+6. [Usage](#usage)
+7. [Features](#features)
+8. [Data Source Requirements](#data-source-requirements)
+9. [Storage & Retention](#storage--retention)
+10. [API Reference](#api-reference)
+11. [Common Commands](#common-commands)
+12. [Troubleshooting](#troubleshooting)
+13. [Configuration](#configuration)
+14. [Running Without Docker (Development)](#running-without-docker-development)
+15. [Support](#support)
+
+---
+
+## What's New in v4.0
+
+| Area | Change |
+|---|---|
+| Data sources | **Option 1:** upload an Excel file. **Option 2:** read a MySQL table (host, database, table + credentials). |
+| Column mapping | Source columns no longer need to be named `ID_NUMBER` / `PERSONAL_NONPERSONAL`. Pick any two columns; the app suggests a mapping automatically. |
+| Preview | The first 20 rows of the file or table are shown, with the mapped columns highlighted, before anything is processed. |
+| ID changes view | Every source row is listed with its original and cleaned ID. Toggle between **All IDs** and **Changed only**, filter by status (kept / dropped), search, and page through large results. |
+| Job history | Results, the per-row change list and the ZIP are stored in a SQLite database for **365 days** (configurable) and deleted automatically afterwards. Past jobs can be re-opened, re-downloaded or deleted from **History**. |
+| Configuration | Retention period, row limit, CORS origins and data directory are set with environment variables in `docker-compose.yml`. |
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────┐         ┌──────────────────────┐
-│   React Frontend     │  HTTP   │   FastAPI Backend     │
-│   (nginx)            │ ──────► │   (uvicorn)           │
-│   localhost:3000      │         │   localhost:8000       │
-└─────────────────────┘         └──────────────────────┘
-     Docker container                Docker container
+┌─────────────────────┐   HTTP    ┌──────────────────────┐   file    ┌────────────────────┐
+│  React Frontend      │ ───────► │  FastAPI Backend      │ ───────► │  SQLite job store   │
+│  (nginx)             │          │  (uvicorn)            │          │  /app/data/         │
+│  localhost:3000      │          │  localhost:8000       │          │  (volume backend_data)│
+└─────────────────────┘          └──────────┬───────────┘          └────────────────────┘
+    Docker container                        │  TCP 3306 (Option 2 only)
+                                            ▼
+                                  ┌──────────────────────┐
+                                  │  Your MySQL server    │
+                                  │  (read-only SELECT)   │
+                                  └──────────────────────┘
 ```
 
 - **Frontend**: React (built with Vite), served as static files via nginx
-- **Backend**: FastAPI (Python), handles all Excel processing logic
-- **Communication**: Frontend calls backend via REST API (`fetch`), both exposed on separate host ports
-- **Storage**: Processed files are kept in backend memory per job (no database required)
+- **Backend**: FastAPI (Python), performs all reading, cleaning and classification
+- **Job store**: SQLite database file on a named Docker volume. Holds every job's summary, per-row before/after results and output ZIP until it expires. No separate database server is required.
+- **MySQL (optional)**: the customer data source for Option 2. The backend only runs `SHOW COLUMNS`, `SELECT COUNT(*)`, a 20-row preview and a `SELECT` of the two mapped columns. Nothing is written to MySQL and the password is never stored.
 
 ---
 
@@ -45,10 +66,11 @@ A dockerized web application that cleans, validates, and formats customer ID num
 
 | Requirement | Version | Notes |
 |---|---|---|
-| Docker Desktop | Latest | Includes Docker Compose. [Download here](https://www.docker.com/products/docker-desktop/) |
-| Windows | 10/11 (64-bit) | WSL2 backend recommended for Docker Desktop |
-| Free disk space | ~2 GB | For Docker images and build cache |
+| Docker Desktop | Latest | Includes Docker Compose. [Download here](https://www.docker.com/products/docker-desktop/). Docker Desktop must be **signed in** if your organisation enforces it. |
+| Windows / macOS / Linux | 64-bit | WSL2 backend recommended on Windows |
+| Free disk space | ~2 GB + job store | Images and build cache, plus the SQLite store (see [Storage & Retention](#storage--retention)) |
 | Free ports | 3000, 8000 | Must not be in use by other applications |
+| MySQL access (Option 2 only) | MySQL 5.7+ / 8.x / MariaDB | A user with `SELECT` on the source table, reachable from the Docker network |
 
 No local Python or Node.js installation is required — everything runs inside containers.
 
@@ -58,13 +80,16 @@ No local Python or Node.js installation is required — everything runs inside c
 
 ```
 BulkCrib/
-├── docker-compose.yml
-├── README.md
+├── docker-compose.yml          # two services + persistent volume backend_data
+├── readme.md
+├── sample_generation.py        # creates sample_test_data.xlsx
+├── sample_test_data.xlsx       # 14-row test file exercising every dashboard tab
 ├── backend/
 │   ├── Dockerfile
 │   ├── .dockerignore
-│   ├── requirements.txt
-│   └── main.py
+│   ├── requirements.txt        # fastapi, uvicorn, pandas, openpyxl, xlrd, pymysql
+│   ├── main.py                 # API, processing engine, MySQL reader, SQLite store, retention
+│   └── data/                   # created at runtime (SQLite store) — inside the volume in Docker
 └── frontend/
     ├── Dockerfile
     ├── .dockerignore
@@ -74,23 +99,33 @@ BulkCrib/
     ├── index.html
     └── src/
         ├── main.jsx
-        └── App.jsx
+        ├── App.jsx                     # navigation + 3-step flow (source → mapping → results)
+        ├── api.js                      # backend calls
+        ├── styles.js
+        └── components/
+            ├── ExcelSource.jsx         # Option 1: drag & drop upload
+            ├── MysqlSource.jsx         # Option 2: connection form
+            ├── MappingPreview.jsx      # column mapping + data preview
+            ├── Results.jsx             # summary / comparison / ID changes / duplicates tabs
+            ├── IdTable.jsx             # paginated all-IDs / changed-only table
+            ├── History.jsx             # stored jobs (view, download, delete)
+            └── ui.jsx
 ```
 
 ---
 
 ## Quick Start
 
-1. **Open PowerShell or Command Prompt** and navigate to the project folder:
+1. **Open a terminal** (PowerShell, Command Prompt or macOS Terminal) and go to the project folder:
    ```powershell
-   cd "D:\CBC Tech Solutions\BulkCrib"
+   cd "path/to/your/folder/"
    ```
 
 2. **Build and start both containers:**
    ```powershell
    docker compose up --build
    ```
-   First build takes 3–5 minutes (downloads base images, installs dependencies).
+   The first build takes 3–5 minutes (downloads base images, installs dependencies).
 
 3. **Open the application:**
    - Frontend (UI): [http://localhost:3000](http://localhost:3000)
@@ -101,20 +136,48 @@ BulkCrib/
    ```powershell
    docker compose down
    ```
+   Stored jobs survive a `down`/`up` cycle because they live on the `backend_data` volume.
 
 ---
 
 ## Usage
 
-1. **Upload** — Drag and drop, or click to browse, for an Excel file (`.xlsx` or `.xls`)
-2. **Review** — The app analyzes the file and shows row count, column check, and a data preview
-3. **Process** — Click "🔄 Process File" to run the cleaning and classification engine
-4. **Review Results** — Explore the dashboard tabs:
-   - **Summary** — record counts, corporate/consumer split, NIC/Passport breakdown
-   - **Comparison** — uploaded vs. output reconciliation, with a pass/fail banner
-   - **Changed IDs** — side-by-side original vs. cleaned ID numbers
-   - **Duplicates** — flags IDs that collapse to the same value after cleaning
-5. **Download** — Click "⬇️ Download ZIP" to save the processed CSV files
+The screen is a three-step flow. The header shows how many jobs are stored and the current retention period.
+
+### Step 1 — Choose a data source
+
+**Option 1: Excel upload**
+1. Select **📁 Excel upload**.
+2. Drag and drop, or click to browse for, an `.xlsx` or `.xls` file.
+3. The file is read and its columns and first 20 rows are shown in Step 2.
+
+**Option 2: MySQL table**
+1. Select **🗄️ MySQL table**.
+2. Enter the host, port, user, password, database and table. The table can be written as `customers` or `schema.customers`.
+   - If the app runs in Docker and MySQL runs on the same computer, use **`host.docker.internal`** as the host, not `localhost`.
+3. Click **🔌 Connect & load columns**. The backend connects, reads the column list, row count and a 20-row preview.
+
+### Step 2 — Map columns and preview
+
+1. Two drop-downs ask which source column holds **ID_NUMBER** and which holds **PERSONAL_NONPERSONAL** (values `P` / `N`).
+   The app pre-selects a mapping when it can recognise the columns (exact names first, then case-insensitive, then common names such as `nic`, `id_no`, `customer_type`).
+2. The preview table highlights the mapped columns. Tick **Show mapped columns only** to hide the rest.
+3. The two columns must be different. Click **🔄 Process N rows** when the mapping is right.
+
+### Step 3 — Review results
+
+- **Summary** — record counts, corporate/consumer split, NIC/passport breakdown, and the list of files in the ZIP.
+- **Comparison** — source vs. output reconciliation with a pass/fail banner and the number of unchanged vs. modified IDs.
+- **ID changes** — every source row with its original and cleaned ID:
+  - **All IDs** lists every row including dropped ones; **Changed only** lists just the rows whose ID was modified.
+  - Filter by status (**Kept**, **Dropped · empty ID**, **Dropped · invalid type**), search for an ID (matches original or cleaned value), and choose 50–1000 rows per page.
+  - Rows are marked **changed** and **duplicate** where applicable.
+- **Duplicates** — IDs that collapse to the same value after cleaning.
+- **⬇️ Download ZIP** saves the processed CSV files. **➕ New job** returns to Step 1.
+
+### History
+
+**🕘 History** lists every stored job with its date, source, mapping, rows in → out, changed count and expiry date. From here you can **View** a job (re-opens the full results including the ID changes view), download its **ZIP**, or **Delete** it before it expires.
 
 ---
 
@@ -122,51 +185,102 @@ BulkCrib/
 
 ### Core Processing
 - Removes special characters (`/`, `(`, `)`, `\`, spaces, commas, periods) from ID numbers
-- Splits records into **Corporate** (`N`) and **Consumer** (`P`) categories
+- Splits records into **Corporate** (`N`) and **Consumer** (`P`) categories (case-insensitive; surrounding spaces ignored)
 - Assigns ID types: `BusinessRegistrationNumber` (corporate), `NIC` or `PassportNumber` (consumer, based on first character)
 - Chunks large output files into batches of 10,000 records
-- Generates change-tracking files for any ID numbers that were modified
+- Generates change-tracking files (`consumer_updated_ids_*.csv`, `corporate_updated_ids_*.csv`) for any ID numbers that were modified
+- Reads Excel cells as text so numeric IDs keep leading zeros and never gain a trailing `.0`
 
-### Enhanced Features (v3.0)
-- **Upload vs. output comparison** — reconciles record counts and flags dropped records (empty IDs, invalid type values)
+### Data Sources & Mapping (v4.0)
+- Excel upload or MySQL table as the source
+- Free column mapping with automatic suggestion
+- Pre-processing preview of the first 20 rows (all columns) with mapped columns highlighted
+
+### Review & Reconciliation
+- **Source vs. output comparison** — reconciles record counts and flags dropped records (empty IDs, invalid type values)
+- **Per-row ID change view** — all rows or changed-only, with status filter, search and paging
 - **Duplicate detection** — identifies IDs that become identical after cleaning (e.g., `123 456` and `123456`)
-- **Interactive dashboard** — tabbed summary, comparison, changes, and duplicates views
-- **Job-based downloads** — processing and downloading are separate steps; results are held server-side until requested
+
+### Job Store (v4.0)
+- Every job (summary, per-row results, ZIP) is stored server-side in SQLite for `RETENTION_DAYS` (default 365) and deleted automatically afterwards
+- History screen to re-open, re-download or delete past jobs
 
 ---
 
-## Excel File Requirements
+## Data Source Requirements
 
-Your Excel file **must** contain these two columns (exact names, case-sensitive):
+### Excel files
+- Formats: `.xlsx`, `.xls`
+- Headers must be in row 1; data starts in row 2. The first sheet is used.
+- Any column names are accepted — you map them in Step 2. Columns named `ID_NUMBER` and `PERSONAL_NONPERSONAL` are mapped automatically.
+- The type column must contain `P` (Personal) or `N` (Corporate). Other values cause the row to be dropped and reported.
+- Maximum size: `MAX_SOURCE_ROWS` rows (default 1,000,000). Under 100,000 rows is recommended for fast processing.
 
-| Column Name | Description | Valid Values |
-|---|---|---|
-| `ID_NUMBER` | Customer identification number | Any alphanumeric string |
-| `PERSONAL_NONPERSONAL` | Customer type indicator | `P` (Personal) or `N` (Corporate) |
+### MySQL tables
+- The MySQL user needs `SELECT` on the table (no write access is used or required).
+- Table name: `table` or `schema.table`, letters, digits, `_` and `$` only.
+- The whole table is read (only the two mapped columns), so the same `MAX_SOURCE_ROWS` limit applies. Create a view in MySQL if you need to filter rows.
+- Network: the backend container must reach the MySQL host and port. For a MySQL server on the Docker host machine use `host.docker.internal`; for a server elsewhere use its hostname or IP and make sure the firewall allows port 3306 from this machine.
+- The password is sent to the backend for that request only and is not stored. The job history records only the host, port, database and table.
 
-- Headers must be in row 1; data starts in row 2
-- Additional columns are ignored (not removed from your original file — the app only reads it)
-- Supported formats: `.xlsx`, `.xls`
-- Recommended limit: under 100,000 rows for reasonable processing time
+A ready-made test file, `sample_test_data.xlsx`, is included (regenerate it with `python sample_generation.py`). It exercises every tab: changed IDs, an empty ID, an invalid type value and one duplicate.
 
-A ready-made test file can be generated with the provided `create_sample.py` script (see previous project notes) to validate all dashboard tabs.
+---
+
+## Storage & Retention
+
+**Where jobs are kept.** The backend stores jobs in a SQLite database file, `bulkcrib.db`, inside the container's `/app/data` directory, which `docker-compose.yml` maps to the named volume `backend_data`. The store survives `docker compose down` and image rebuilds; it is removed only by `docker compose down -v` or by deleting the volume.
+
+**What is stored per job:** the summary statistics, one record per source row (original ID, cleaned ID, type, ID type, status, changed/duplicate flags), the file list, the ZIP of output CSVs, and the source description (file name, or MySQL host/database/table — never the password).
+
+**Retention.** A job is deleted automatically once it is older than `RETENTION_DAYS` (default **365**). The cleanup runs when the backend starts and then every `CLEANUP_INTERVAL_HOURS` (default 24). Changing `RETENTION_DAYS` applies to existing jobs as well, because expiry is computed from the job's creation time. Individual jobs can also be deleted from History at any time.
+
+**Why SQLite rather than a bundled MySQL.** The app has a single backend process writing small blobs, which SQLite handles without any extra service, credentials, port or memory. Backups are a file copy. A MySQL or PostgreSQL container would add operational overhead without a benefit at this scale. The MySQL in Option 2 is the *customer's* source database and is deliberately not used for the app's own storage, so the tool keeps working when that server is unavailable.
+
+**Disk usage.** Roughly 100–150 bytes per source row plus the compressed ZIP (a few hundred KB per 100,000 IDs). A year of daily 100,000-row jobs is in the order of 5 GB.
+
+**Backup and restore:**
+```powershell
+# Back up the store to the current folder
+docker compose cp backend:/app/data/bulkcrib.db ./bulkcrib-backup.db
+
+# Restore (stop the backend first)
+docker compose stop backend
+docker compose cp ./bulkcrib-backup.db backend:/app/data/bulkcrib.db
+docker compose start backend
+```
 
 ---
 
 ## API Reference
 
-Base URL: `http://localhost:8000`
+Base URL: `http://localhost:8000`. Interactive documentation with request/response schemas: [http://localhost:8000/docs](http://localhost:8000/docs).
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `GET` | `/api/health` | Health check, returns `{"status": "healthy"}` |
-| `POST` | `/api/analyze` | Upload a file for validation/preview only (no processing) |
-| `POST` | `/api/process` | Upload and fully process a file; returns `job_id` and summary statistics |
-| `GET` | `/api/download/{job_id}` | Download the ZIP of processed CSV files for a given job |
+| `GET` | `/api/health` | Health check: version, retention days, row limit, number of stored jobs |
+| `POST` | `/api/excel/inspect` | Multipart `file`. Returns columns, row count, 20-row preview and suggested mapping |
+| `POST` | `/api/excel/process` | Multipart `file` + form fields `id_column`, `type_column`. Processes and stores the job; returns the job |
+| `POST` | `/api/mysql/inspect` | JSON `{host, port, user, password, database, table}`. Returns columns, row count, preview, suggested mapping |
+| `POST` | `/api/mysql/process` | Same JSON plus `id_column`, `type_column`. Processes and stores the job; returns the job |
+| `GET` | `/api/jobs?limit=100` | Stored jobs, newest first (no ZIP data) |
+| `GET` | `/api/jobs/{job_id}` | One job: source, mapping, summary, file list, created/expiry timestamps |
+| `GET` | `/api/jobs/{job_id}/rows` | Per-row results. Query: `view=all\|changed`, `status=ok\|empty_id\|invalid_type`, `search=`, `page=`, `page_size=` (max 1000) |
+| `GET` | `/api/jobs/{job_id}/download` | ZIP of processed CSV files |
+| `DELETE` | `/api/jobs/{job_id}` | Delete a job before it expires |
 
-Full interactive documentation with request/response schemas is available at [http://localhost:8000/docs](http://localhost:8000/docs) once the backend is running.
+Example:
+```bash
+# Inspect a workbook
+curl -F "file=@sample_test_data.xlsx" http://localhost:8000/api/excel/inspect
 
-**Note:** Processed jobs are stored in backend memory only. The 20 most recent jobs are kept; older ones are discarded, and all jobs are lost if the backend container restarts. Download promptly after processing.
+# Process with an explicit mapping
+curl -F "file=@sample_test_data.xlsx" -F id_column=ID_NUMBER -F type_column=PERSONAL_NONPERSONAL \
+     http://localhost:8000/api/excel/process
+
+# Changed IDs only, 50 per page
+curl "http://localhost:8000/api/jobs/<job_id>/rows?view=changed&page_size=50"
+```
 
 ---
 
@@ -179,8 +293,11 @@ docker compose up --build
 # Start in the background (detached)
 docker compose up -d --build
 
-# Stop and remove containers
+# Stop and remove containers (job store is kept)
 docker compose down
+
+# Stop, remove containers AND delete the job store
+docker compose down -v
 
 # View logs for a specific service
 docker compose logs backend
@@ -196,6 +313,9 @@ docker compose up --build backend
 # Check running containers
 docker ps
 
+# Inspect the job store volume
+docker volume inspect bulk-crib_backend_data
+
 # Full reset (remove containers, networks, and rebuild from scratch)
 docker compose down
 docker compose build --no-cache
@@ -206,31 +326,56 @@ docker compose up
 
 ## Troubleshooting
 
+### Docker refuses to start: "This machine is required to be signed in while using Docker Desktop"
+**Fix:** Open Docker Desktop and click **Sign in** (top right), or run `docker login` in the terminal. Use your organisation's account if sign-in is enforced by IT. Then run `docker compose up --build` again.
+
 ### Port already in use
 **Symptom:** Error like `port is already allocated` on 3000 or 8000.
 **Fix:** Stop whatever is using that port, or change the host-side port in `docker-compose.yml` (e.g., `"3001:80"`) and access via the new port.
 
-### Frontend loads but shows network/CORS errors
-**Symptom:** UI loads, but upload/process fails with a fetch or CORS error.
-**Fix:** Confirm the backend is running (`http://localhost:8000/api/health` should respond). Check that `main.py`'s CORS `allow_origins` includes the frontend's actual URL/port.
+### Frontend loads but shows "Backend unreachable" or CORS errors
+**Fix:** Confirm the backend is running (`http://localhost:8000/api/health` should respond). If the UI is served from a different host or port than `localhost:3000`, add that origin to `ALLOWED_ORIGINS` in `docker-compose.yml` and restart.
 
-### "Missing required columns" error
-**Symptom:** Analysis step fails even though your file looks correct.
-**Fix:** Check for extra spaces in column headers, verify exact spelling (`ID_NUMBER`, `PERSONAL_NONPERSONAL`), and confirm headers are in row 1.
+### MySQL: "connection failed … Can't connect to MySQL server on 'localhost'"
+**Cause:** Inside Docker, `localhost` is the backend container itself.
+**Fix:** Use `host.docker.internal` as the host for a MySQL server on this computer. For a remote server, check hostname, port, firewall and that the user is allowed to connect from this machine's address (`GRANT … TO 'user'@'%'` or the specific host).
 
-### Download fails with "Job not found or expired"
-**Symptom:** Clicking download after some time returns a 404.
-**Fix:** Backend was likely restarted, or the job aged out (only 20 most recent are kept). Re-upload and reprocess the file.
+### MySQL: "Access denied" or "Table … doesn't exist"
+**Fix:** Verify the database and table names (case-sensitive on Linux servers) and that the user has `SELECT` on the table. Use `schema.table` if the table is in a different schema than the one entered as Database.
+
+### "Column(s) not found in source"
+**Fix:** The mapping refers to a column that is not in the file/table. Re-run Step 1 and pick the columns from the drop-downs; column names are matched exactly, including spaces and case.
+
+### Many rows dropped as "invalid type"
+**Fix:** The type column must contain `P` or `N` (case-insensitive). Check the status filter in the **ID changes** tab to see the exact values that were rejected, and map a different column if necessary.
+
+### "File has N rows; the limit is 1,000,000"
+**Fix:** Split the source, filter it with a MySQL view, or raise `MAX_SOURCE_ROWS` in `docker-compose.yml` (needs enough memory in the backend container).
+
+### History is empty after restarting
+**Cause:** `docker compose down -v` deletes the `backend_data` volume, and with it every stored job.
+**Fix:** Use `docker compose down` (without `-v`) for routine restarts. Restore from a backup if you have one (see [Storage & Retention](#storage--retention)).
 
 ### Docker build is very slow or fails on dependency install
 **Fix:** Ensure a stable internet connection (build downloads Python/Node packages). Try `docker compose build --no-cache` for a clean retry.
 
 ### Changes to code aren't reflected
-**Fix:** Code is copied into the image at build time — always run `docker compose up --build` after editing `main.py` or `App.jsx`, not just `docker compose up`.
+**Fix:** Code is copied into the image at build time — always run `docker compose up --build` after editing the backend or frontend, not just `docker compose up`.
 
 ---
 
 ## Configuration
+
+### Environment variables (backend)
+Set in the `environment:` block of the `backend` service in `docker-compose.yml`.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `RETENTION_DAYS` | `365` | Days a processed job is kept before automatic deletion |
+| `CLEANUP_INTERVAL_HOURS` | `24` | How often the expiry cleanup runs (it also runs at startup) |
+| `DATA_DIR` | `/app/data` | Directory holding the SQLite store `bulkcrib.db` (mapped to the `backend_data` volume) |
+| `MAX_SOURCE_ROWS` | `1000000` | Sources with more rows are rejected |
+| `ALLOWED_ORIGINS` | `http://localhost:3000,http://localhost:5173` | Comma-separated frontend origins allowed to call the API (CORS) |
 
 ### Changing ports
 Edit `docker-compose.yml`:
@@ -243,24 +388,41 @@ services:
     ports:
       - "3000:80"     # change the left-hand (host) port only
 ```
-If you change the backend host port, also update the `API` constant in `frontend/src/App.jsx` to match, then rebuild.
-
-### CORS (allowed frontend origins)
-In `backend/main.py`:
-```python
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:5173"],
-    ...
-)
+If you change the backend host port, or serve the UI from another machine, rebuild the frontend with the backend URL set:
+```yaml
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: http://your-server:8000
 ```
-Add any additional origin (e.g., a server hostname) here if deploying beyond localhost.
+and add the matching UI origin to `ALLOWED_ORIGINS`. (The frontend defaults to `http://localhost:8000`.)
 
 ### Chunk size for output files
-In `backend/main.py`, inside `finalize_and_chunk`:
+In `backend/main.py`:
 ```python
-chunk_size = 10000  # adjust records per output CSV file
+CHUNK_SIZE = 10000  # records per output CSV file
 ```
+
+---
+
+## Running Without Docker (Development)
+
+Backend (Python 3.11+ recommended):
+```bash
+cd backend
+python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+uvicorn main:app --reload --port 8000                  # store is created in backend/data/
+```
+
+Frontend (Node 20+):
+```bash
+cd frontend
+npm install
+npm run dev                                            # http://localhost:3000, hot reload
+```
+The dev server on port 3000 is already in the default `ALLOWED_ORIGINS`.
 
 ---
 
@@ -277,5 +439,5 @@ For issues:
 
 ---
 
-**Version:** 3.0
-**Last Updated:** December 2024
+**Version:** 4.0
+**Last Updated:** September 2026
